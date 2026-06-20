@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#0b0e14"/>
+  <rect x="40" y="40" width="432" height="432" rx="88" fill="none" stroke="#76b900" stroke-width="14"/>
+  <text x="256" y="300" font-size="200" text-anchor="middle" font-family="-apple-system,Helvetica,Arial,sans-serif" font-weight="800" fill="#76b900">PF</text>
+  <text x="256" y="400" font-size="56" text-anchor="middle" font-family="-apple-system,Helvetica,Arial,sans-serif" fill="#e6edf3">PREP</text>
+</svg>

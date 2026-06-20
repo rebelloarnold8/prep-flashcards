@@ -1,0 +1,70 @@
+:root{
+  --bg:#0b0e14; --panel:#121722; --panel2:#1a2130; --ink:#e6edf3; --dim:#8b98a9;
+  --line:#222c3c; --accent:#76b900; /* NVIDIA green */ --accent2:#3b82f6;
+  --again:#ef4444; --hard:#f59e0b; --good:#22c55e; --easy:#38bdf8;
+  --radius:16px;
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:#f4f6fa; --panel:#fff; --panel2:#eef1f6; --ink:#10151d; --dim:#5b6675; --line:#dde3ec; }
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{
+  background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+  display:flex; flex-direction:column; min-height:100dvh;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.hidden{display:none !important}
+kbd{font:11px/1 ui-monospace,monospace;background:rgba(127,127,127,.18);border:1px solid var(--line);
+  border-radius:5px;padding:2px 5px;margin-left:6px;color:var(--dim);vertical-align:middle}
+small{display:block;font-size:11px;color:rgba(255,255,255,.65);font-weight:400;margin-top:2px}
+
+#bar{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);
+  position:sticky;top:0;background:var(--bg);z-index:5}
+#bar .title{font-weight:700;font-size:18px}
+#bar .counts{margin-left:auto;display:flex;gap:8px;font-size:13px}
+#bar .counts span{background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:3px 10px;color:var(--dim)}
+#dueCount{color:var(--accent) !important;font-weight:600}
+button.icon{background:none;border:none;color:var(--ink);font-size:20px;cursor:pointer}
+
+.screen{flex:1;display:flex;flex-direction:column;padding:16px;max-width:760px;width:100%;margin:0 auto}
+#topics{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.topic{background:var(--panel2);border:1px solid var(--line);color:var(--dim);border-radius:20px;
+  padding:6px 12px;font-size:13px;cursor:pointer;user-select:none}
+.topic.on{background:var(--accent);color:#0a0e06;border-color:var(--accent);font-weight:600}
+
+#cardWrap{flex:1;display:flex;flex-direction:column;justify-content:center}
+#card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:22px;
+  box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.meta{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;color:var(--dim);font-size:13px}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:2px 10px;font-weight:600;letter-spacing:.04em}
+.face{font-size:21px;line-height:1.55;white-space:pre-wrap}
+.face code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:.92em}
+.back{font-size:18px;color:var(--ink)}
+.back b{color:var(--accent)}
+hr{border:none;border-top:1px dashed var(--line);margin:18px 0}
+
+#showRow,#rateRow{margin-top:22px}
+#rateRow{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+button.primary{background:var(--accent);color:#0a0e06;border:none;border-radius:12px;padding:14px;
+  font-size:16px;font-weight:700;cursor:pointer;width:100%}
+button.big{padding:16px}
+button.rate{border:none;border-radius:12px;padding:12px 6px;color:#fff;font-weight:700;cursor:pointer;font-size:15px}
+.rate.again{background:var(--again)} .rate.hard{background:var(--hard)} .rate.good{background:var(--good)} .rate.easy{background:var(--easy)}
+
+#empty{text-align:center;color:var(--dim)}
+#empty h2{color:var(--ink)}
+#stats{margin-top:18px;color:var(--dim);font-size:13px;text-align:center}
+
+/* settings */
+#settings h2{margin-top:0}
+#settings h3{margin:22px 0 6px;font-size:14px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.row{display:flex;flex-direction:column;gap:6px;margin:10px 0;font-size:14px;color:var(--dim)}
+.row input{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px;color:var(--ink);font-size:15px}
+.hint{color:var(--dim);font-size:13px}
+.btnrow{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
+.btnrow.end{justify-content:flex-end;margin-top:24px}
+#settings button{background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:10px;
+  padding:11px 16px;font-size:14px;cursor:pointer;flex:1;min-width:120px}
+#settings button.primary{background:var(--accent);color:#0a0e06;border:none;flex:0 0 auto}
+#settings button.danger{background:var(--again);color:#fff;border:none}

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b0e14" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Prep Cards" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="style.css" />
+<title>NVIDIA Prep · Flashcards</title>
+</head>
+<body>
+<header id="bar">
+  <div class="title">🧠 Prep Cards</div>
+  <div class="counts">
+    <span id="dueCount" title="Due now">0 due</span>
+    <span id="newCount" title="New cards available">0 new</span>
+  </div>
+  <button id="settingsBtn" class="icon" title="Settings">⚙︎</button>
+</header>
+
+<main id="study" class="screen">
+  <div id="topics"></div>
+
+  <section id="cardWrap">
+    <div id="empty" class="hidden">
+      <h2>All caught up ✅</h2>
+      <p>No cards due right now. Add a topic filter, study new cards, or come back later.</p>
+      <button id="studyNewBtn" class="primary">Study new cards anyway</button>
+    </div>
+
+    <div id="card" class="hidden">
+      <div class="meta"><span id="cardTopic" class="chip"></span><span id="cardPos"></span></div>
+      <div id="front" class="face"></div>
+      <hr id="divider" class="hidden" />
+      <div id="back" class="face back hidden"></div>
+
+      <div id="showRow">
+        <button id="showBtn" class="primary big">Show answer <kbd>space</kbd></button>
+      </div>
+      <div id="rateRow" class="hidden">
+        <button class="rate again" data-q="0">Again<small>&lt;10m</small><kbd>1</kbd></button>
+        <button class="rate hard"  data-q="3">Hard<small id="iHard"></small><kbd>2</kbd></button>
+        <button class="rate good"  data-q="4">Good<small id="iGood"></small><kbd>3</kbd></button>
+        <button class="rate easy"  data-q="5">Easy<small id="iEasy"></small><kbd>4</kbd></button>
+      </div>
+    </div>
+  </section>
+
+  <footer id="stats"></footer>
+</main>
+
+<section id="settings" class="screen hidden">
+  <h2>Settings</h2>
+
+  <label class="row">New cards per session
+    <input id="newPerDay" type="number" min="0" max="200" />
+  </label>
+
+  <h3>Cross-device sync (GitHub Gist · free)</h3>
+  <p class="hint">Create a token at <b>github.com/settings/tokens</b> → "Generate new token (classic)" → tick only the <b>gist</b> scope. Paste it below. Your progress syncs through a private gist — works on Mac, iPad, iPhone.</p>
+  <label class="row">GitHub token
+    <input id="ghToken" type="password" placeholder="ghp_..." autocomplete="off" />
+  </label>
+  <label class="row">Gist ID (auto-filled on first push)
+    <input id="gistId" type="text" placeholder="leave blank to create" />
+  </label>
+  <div class="btnrow">
+    <button id="pushBtn">⬆︎ Push</button>
+    <button id="pullBtn">⬇︎ Pull &amp; merge</button>
+  </div>
+  <p id="syncMsg" class="hint"></p>
+
+  <h3>Local backup</h3>
+  <div class="btnrow">
+    <button id="exportBtn">Export JSON</button>
+    <button id="importBtn">Import JSON</button>
+    <input id="importFile" type="file" accept="application/json" hidden />
+  </div>
+
+  <h3>Danger</h3>
+  <div class="btnrow">
+    <button id="resetProgress" class="danger">Reset all progress</button>
+  </div>
+
+  <div class="btnrow end"><button id="closeSettings" class="primary">Done</button></div>
+  <p class="hint">v1 · cards: <span id="cardTotal">0</span></p>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>
