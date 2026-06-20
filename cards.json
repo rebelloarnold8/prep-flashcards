@@ -2763,5 +2763,880 @@
     "topic": "ARITH",
     "q": "Why can FP16 represent every integer up to 2048 exactly but not 2049, and what is the general rule?",
     "a": "**A float represents every integer exactly only up to `2^p` where p is the significand bit count (including the hidden bit); beyond that the gap between representable values exceeds 1.** FP16 has p=11, so integers are exact through `2^11 = 2048`, but `2049` is not representable (spacing becomes 2). The analogous limits are `2^24 = 16,777,216` for FP32 and `2^53` for FP64."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "In the nvcc compilation flow, how is a .cu source file split between the host path and the device path?",
+    "a": "**`nvcc` separates device and host code.** Device code (`__global__`/`__device__` functions) is compiled to PTX then to SASS via `ptxas` and embedded as a fatbinary, while host code is handed to the host C++ compiler (e.g. `g++`/`clang`). The kernel launch (`<<<>>>`) is lowered into CUDA Runtime calls (e.g. `cudaLaunchKernel`) that reference the embedded device image."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "Compare PTX and SASS: which is the virtual ISA vs the native machine ISA?",
+    "a": "**PTX is the virtual/intermediate ISA; SASS is the native machine ISA.** `PTX` (Parallel Thread eXecution) is a forward-compatible virtual assembly targeting a `compute_XX` virtual architecture. `SASS` (Streaming ASSembler) is the actual hardware instruction set for a specific `sm_XX` GPU, produced from PTX by `ptxas`."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "What does ptxas do, and why is it surprising that it is an optimizing compiler?",
+    "a": "**`ptxas` compiles PTX into SASS for a target `sm_XX`.** Despite the name, it is a full optimizing backend, not a simple assembler: it performs register allocation, instruction scheduling, and other optimizations. So PTX is not a 1:1 preview of final SASS, and the `-O` level passed via `-Xptxas` affects performance."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "Explain the PTX forward-compatibility guarantee and how driver JIT provides it.",
+    "a": "**PTX is forward-compatible: PTX for an older virtual arch can run on a newer real GPU via driver JIT.** If a fatbinary contains PTX but no SASS matching the installed GPU, the driver JIT-compiles that PTX to SASS at load time. This lets a binary run on GPUs that did not exist at build time, at the cost of first-launch JIT latency (mitigated by the driver's JIT cache)."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "What is a CUDA fatbinary, and what does it contain?",
+    "a": "**A fatbinary bundles multiple device code images into one host binary.** It can hold several SASS images (one per `sm_XX` compiled for) and/or PTX images (per `compute_XX`). At launch the driver selects the SASS matching the GPU, or falls back to JIT-compiling an embedded PTX image if no exact SASS match exists."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "In `-gencode`, what is the difference between the `arch=compute_XX` and `code=sm_XX` clauses?",
+    "a": "**`arch=compute_XX` selects the virtual PTX architecture (feature/front-end level); `code=...` selects what is embedded.** `code=sm_XX` embeds real SASS; `code=compute_XX` embeds PTX (for JIT). Example: `-gencode arch=compute_80,code=sm_80` builds PTX for `compute_80` then assembles SASS for `sm_80`."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "How do you embed BOTH SASS for an Ampere A100 and forward-compatible PTX in one build using -gencode?",
+    "a": "**List the real SASS plus a PTX fallback in `code`.** Use `-gencode arch=compute_80,code=sm_80 -gencode arch=compute_80,code=compute_80`. The first embeds SASS for `sm_80`; the second embeds `compute_80` PTX so newer GPUs (e.g. Hopper) can JIT it. By contrast `-arch=sm_80` embeds SASS only, so it would NOT JIT forward."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "What does the shorthand `-arch=sm_70` expand to, and what is the forward-compatibility consequence of using it alone?",
+    "a": "**`-arch=sm_70` is equivalent to `-gencode arch=compute_70,code=sm_70`, embedding SASS only and no PTX.** With no PTX image, the binary fails to load on a future GPU with no matching SASS (nothing to JIT). For forward compatibility you must also embed PTX (e.g. add `code=compute_70`)."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "What does `-arch=native` (and `-arch=all`) do in recent nvcc, and why is it convenient?",
+    "a": "**`-arch=native` makes `nvcc` detect the GPUs in the build machine and target their compute capabilities automatically.** It avoids hand-listing `-gencode` clauses for local builds. `-arch=all` instead builds for every architecture the toolkit supports, and `-arch=all-major` builds for each major capability (with PTX of the newest)."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "Why can a kernel that uses too many registers spill, and where do spilled values go?",
+    "a": "**Register pressure exceeding the per-thread allocation forces spills to local memory.** When live values outnumber available registers, `ptxas` evicts some to 'local memory', which is per-thread storage physically in off-chip device DRAM (cached in L1/L2). Spill loads/stores add latency and consume memory bandwidth."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "What is the hardware limit on registers per thread on modern NVIDIA GPUs, and what happens at that ceiling?",
+    "a": "**The architectural limit is 255 registers per thread** (since Kepler; Fermi was 63). A thread cannot be allocated more than 255 registers; if its working set needs more, `ptxas` must spill the excess to local memory rather than exceed the cap."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "Compare `__launch_bounds__` and `-maxrregcount` for controlling register usage.",
+    "a": "**Both cap registers to raise occupancy, but at different granularity.** `__launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor)` is a per-kernel attribute letting `ptxas` derive a register budget from the desired occupancy. `-maxrregcount=N` is a translation-unit-wide flag capping registers for all kernels in the file. `__launch_bounds__` is preferred and takes precedence for that kernel."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "You apply `__launch_bounds__(256, 4)` to a kernel on an SM with a 64K-register file. What register budget does ptxas infer?",
+    "a": "**It targets ~64 registers/thread.** Requesting 4 blocks of 256 threads = 1024 threads resident per SM. With a 65,536-register file, that is 65,536 / 1024 = 64 registers/thread. `ptxas` tries to keep usage at or below 64 (spilling if the kernel truly needs more) so the requested 4-block occupancy is achievable."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "Why can lowering `-maxrregcount` sometimes HURT performance even though it raises occupancy?",
+    "a": "**Capping registers too aggressively forces spills to local memory.** Higher occupancy hides latency, but if the cap is below the kernel's true register need, the resulting spill loads/stores add DRAM-bound traffic and extra instructions. The net effect can be slower despite more active warps; it is a tradeoff that must be measured."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "How does per-thread register usage translate into occupancy limits on an SM?",
+    "a": "**Registers are partitioned among all resident threads from a fixed SM register file.** Max resident threads = register-file-size / registers-per-thread, then rounded down by allocation granularity. E.g. a 65,536-register SM with 32 regs/thread allows up to 2048 threads, but 64 regs/thread halves that to 1024. Occupancy is the minimum across registers, shared memory, blocks/SM, and warps/SM."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "A kernel uses 96 registers/thread on an SM with a 65,536-register file and a 2048-thread (64-warp) max. What is the register-limited occupancy?",
+    "a": "**About 21 warps -> roughly 33% of the 64-warp max.** 65,536 / 96 = 682 threads (ignoring granularity) = ~21 warps, well below the 2048-thread / 64-warp ceiling. Registers, not the hardware warp limit, bound occupancy here; rounding to allocation granularity can reduce it slightly further."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "How does shared-memory usage per block interact with registers in determining occupancy?",
+    "a": "**Occupancy is limited by whichever resource runs out first: registers, shared memory, threads/SM, or blocks/SM.** Shared memory per block caps resident blocks = shared-mem-per-SM / shared-mem-per-block. Even with light register use, a block requesting large `__shared__` arrays can cap blocks/SM and thus warps/SM. Achievable occupancy is the minimum across all limiters."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "What tool inspects the device code in a CUDA binary, and what command disassembles SASS?",
+    "a": "**`cuobjdump` extracts/inspects fatbinary contents; `cuobjdump -sass <binary>` disassembles to SASS.** Use `cuobjdump -ptx` to dump PTX images and `cuobjdump -elf` for ELF details. It works on host executables, `.o` files, and cubins."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "How does nvdisasm differ from cuobjdump for examining device code?",
+    "a": "**`nvdisasm` is a dedicated SASS disassembler that operates on cubins/ELF and offers richer output.** Unlike `cuobjdump` (which extracts code from fatbins/host binaries), `nvdisasm` works on a standalone cubin and can emit control-flow graphs (`-cfg`), basic-block info, and resolved control/scheduling info, making it the tool for deep SASS analysis."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "What is ILP in GPU instruction scheduling, and why does it matter alongside occupancy?",
+    "a": "**ILP (instruction-level parallelism) is independent work the scheduler can overlap within a single thread.** GPUs hide latency via both TLP (many warps) and ILP (independent instructions per thread). High ILP can let a kernel reach full throughput at lower occupancy, so cutting registers to raise occupancy is not always needed if ILP already covers the latency."
+  },
+  {
+    "topic": "COMPILER",
+    "q": "A developer says their PTX 'looks optimal' but real performance is poor. Where is the analysis flawed?",
+    "a": "**PTX is not the final code -- `ptxas` re-optimizes it into SASS.** PTX uses an unlimited virtual register set and is pre-register-allocation; register pressure, spills, instruction scheduling, and dual-issue decisions all happen in `ptxas` when producing SASS. Performance analysis must inspect SASS (via `cuobjdump -sass` / `nvdisasm`), not PTX."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Name the five stages of the classic RISC pipeline in order and state what each does.",
+    "a": "**IF/ID/EX/MEM/WB.** `IF` (instruction fetch) reads the instruction from I-cache and increments the PC; `ID` (instruction decode) decodes and reads the register file (and computes branch targets in some designs); `EX` (execute) runs the ALU op or computes an effective address; `MEM` (memory access) reads/writes D-cache for loads/stores; `WB` (write-back) writes the result into the register file."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is the purpose of pipeline registers (latches) between stages, and what do they hold?",
+    "a": "**Pipeline registers** (e.g. `IF/ID`, `ID/EX`, `EX/MEM`, `MEM/WB`) hold all the data and control signals an instruction needs in later stages, isolating each stage so multiple instructions can be in flight simultaneously. They are clocked, so every cycle each instruction's state advances exactly one stage; without them stages couldn't operate concurrently on different instructions."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Define the three classes of pipeline hazards.",
+    "a": "**Structural, data, and control hazards.** A *structural hazard* is contention for a hardware resource (e.g. one memory port for both fetch and load). A *data hazard* is when an instruction depends on a result not yet available. A *control hazard* arises from branches/jumps changing the PC before the outcome is known, so fetched instructions may be wrong."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why does a single unified memory (one port for instructions and data) cause a structural hazard in the 5-stage pipeline, and how is it resolved?",
+    "a": "**Structural hazard from a shared memory port:** in any cycle `IF` of one instruction needs to fetch while `MEM` of an earlier load/store needs data access, but a single-port memory can serve only one. It is resolved by providing **separate instruction and data caches** (a Harvard-style split), giving independent ports so fetch and memory access proceed in the same cycle."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Distinguish RAW, WAR, and WAW data hazards and state which one can occur in a simple in-order 5-stage pipeline.",
+    "a": "**RAW (read-after-write)** is a true dependence — a later read needs an earlier write's value. **WAR (write-after-read)** and **WAW (write-after-write)** are name/anti dependences from register reuse. Only **RAW** occurs in a simple in-order 5-stage pipeline, because instructions read in `ID` and write in `WB` in program order; WAR/WAW appear with out-of-order issue or multiple/variable write latencies that reorder writes."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is forwarding (bypassing) and which pipeline-register outputs feed the EX-stage forwarding muxes?",
+    "a": "**Forwarding/bypassing** routes a freshly computed result directly to a later instruction's ALU input instead of waiting for it to be written back to the register file. The EX-stage ALU operand muxes take values from the **`EX/MEM` pipeline register** (result one instruction ahead) and the **`MEM/WB` pipeline register** (result two instructions ahead), in addition to the normal register-file read."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Given `add x1, x2, x3` immediately followed by `sub x4, x1, x5`, explain how forwarding eliminates the stall.",
+    "a": "**EX-to-EX forwarding (EX/MEM bypass).** When `add` finishes EX, its result sits in the `EX/MEM` register exactly as `sub` enters EX. The forwarding unit detects `EX/MEM.rd == ID/EX.rs1` and selects the `EX/MEM` ALU result as `sub`'s operand, so `sub` gets `x1` with **zero stall cycles** despite the result not yet being written back."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why can't forwarding fully hide a load-use dependence, and what is the resulting penalty?",
+    "a": "**Load-use hazard.** A load's data isn't ready until the end of `MEM`, but a dependent instruction needs it at the start of its `EX` — these overlap in time, so no forwarding path can travel backward in the cycle. The hardware must insert **one stall cycle (a single bubble)**; after the stall, `MEM/WB`-to-EX forwarding delivers the loaded value."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is a precise exception, and what pipeline mechanism is used to deliver one?",
+    "a": "**A precise exception** means that when an exception is taken, all instructions before the faulting one have completed and none after it have modified architectural state, so the saved PC unambiguously identifies the fault point. In the in-order 5-stage pipeline this is achieved by **flushing the faulting instruction and all younger ones and posting exceptions in program order at a single commit point** (conceptually at `WB`), so out-of-order completion never corrupts the architectural state seen on a trap."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What two jobs does the hazard detection unit perform that forwarding alone cannot, and where does it sit?",
+    "a": "**Stall insertion and bubble generation.** Located in the `ID` stage, it detects a load in `EX` whose destination matches a source of the instruction in `ID` (`ID/EX.MemRead && (ID/EX.rd == IF/ID.rs1 || == IF/ID.rs2)`). On a hit it **freezes the PC and `IF/ID` register** (stalling IF/ID) and **inserts a bubble** by zeroing the `ID/EX` control signals for one cycle."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "How does inserting a bubble differ from flushing an instruction in a pipeline?",
+    "a": "**A bubble stalls; a flush squashes.** A *bubble* holds the front of the pipe (PC and `IF/ID`) and injects a NOP into the next stage so a still-valid instruction is merely delayed. A *flush* converts already-fetched, wrong-path instructions into NOPs (clearing their control signals) because they should never have entered the pipeline — used after a taken/mispredicted branch."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "If a branch is resolved in the MEM stage and the pipeline fetches sequentially in the meantime, how many instructions are flushed on a taken branch?",
+    "a": "**Three instructions.** With resolution in `MEM` (stage 4) and naive fetch-fall-through, the branch's outcome is known only after the three instructions fetched behind it (in `IF`, `ID`, `EX`) have entered the pipe; all **3 wrong-path instructions are flushed**, giving a 3-cycle penalty. Moving resolution earlier (e.g. to `ID`/`EX`) reduces this."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What hardware lets a branch be resolved in the ID stage, cutting the taken-branch penalty to one cycle?",
+    "a": "**A dedicated branch comparator and target adder in `ID`.** Adding a fast equality/sign comparator on the register-file outputs plus an adder for `PC + offset` in the decode stage lets the branch condition and target be known by the end of `ID`. Only the **single instruction in `IF`** is wrong, so the penalty drops to **1 flush cycle** (at the cost of possibly forwarding into the comparator)."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Compute the CPI impact: an ideal pipeline (base CPI 1.0) has 20% branches, each taken branch costs a 1-cycle penalty, and 60% of branches are taken (no prediction). What is the average CPI?",
+    "a": "**CPI = 1.12.** Penalty cycles per instruction = 0.20 (branches) x 0.60 (taken) x 1 (penalty) = **0.12**. Adding to the base of 1.0 gives `CPI = 1 + 0.12 = 1.12`."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is a delayed branch slot and what semantic guarantee does it give?",
+    "a": "**A delay slot** is the instruction position immediately after a branch that the ISA defines to **always execute regardless of branch outcome**. It exposes the 1-cycle resolution latency to software so the compiler can fill the slot with useful work (or a NOP), hiding the control hazard without hardware flushing. Classic MIPS/SPARC use one delay slot."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why have modern deeply-pipelined and superscalar processors abandoned the delayed-branch slot?",
+    "a": "**It does not scale and leaks microarchitecture into the ISA.** A single delay slot only hides one cycle, but deep/wide pipelines have many bubble cycles per misprediction; multiple delay slots would be needed and would constrain fetch width. It also complicates exceptions and pipeline restart, so designs now rely on **branch prediction** instead, which is a microarchitectural choice invisible to the ISA."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Compare 'always-not-taken' (predict fall-through) versus the BTFN static prediction heuristic.",
+    "a": "**Always-not-taken** simply keeps fetching sequentially and is right only when branches fall through. **BTFN (backward-taken, forward-not-taken)** predicts backward branches as taken and forward branches as not-taken, exploiting that loop-closing branches (backward) are usually taken. BTFN typically achieves far higher accuracy on loop-heavy code with no profiling needed."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "How does a 1-bit branch predictor behave on a loop branch, and what is its characteristic weakness?",
+    "a": "**A 1-bit predictor** stores the last outcome and predicts it will repeat. On a loop it **mispredicts twice per full execution of the loop**: once on the final iteration (predicts taken, loop exits) and once on re-entry (predicts not-taken, but it's taken). A single anomalous outcome flips the bit, so it handles steady patterns poorly at boundaries."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Draw out the four states of a 2-bit saturating counter and explain why it beats a 1-bit predictor on loops.",
+    "a": "**States: 00 strongly-NT, 01 weakly-NT, 10 weakly-T, 11 strongly-T**, incrementing on taken and decrementing on not-taken (saturating at ends). It requires **two consecutive mispredictions to change the prediction direction**, so a single anomaly (like a loop's last iteration) doesn't flip the prediction — yielding only **one misprediction per loop** instead of two."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is the key idea of a correlating (two-level) branch predictor, and what does the global history register hold?",
+    "a": "**Correlating predictors exploit that a branch's outcome correlates with recent outcomes of other branches.** A **global history register (GHR)** is a shift register of the last *k* branch outcomes (1=taken); it indexes (alone or combined with the PC) a pattern history table of 2-bit counters, so the prediction is conditioned on the recent control-flow path, not just this branch's own history."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "How does gshare form its index into the pattern history table, and why XOR rather than concatenate?",
+    "a": "**gshare XORs the global history register with the branch PC bits** to index the pattern history table. XORing (rather than concatenating) lets a small history and small PC field map into a larger table, **mixing both sources of information into the same index width** and spreading entries to reduce aliasing/collisions for a given table size."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What does a tournament (hybrid) predictor combine, and what is the role of its selector/chooser?",
+    "a": "**A tournament predictor runs two component predictors** (e.g. a local/per-branch history predictor and a global/correlating predictor) and uses a **meta/selector predictor** — typically a table of 2-bit counters indexed by branch — to learn, per branch, which component has been more accurate and pick its prediction. This adapts so each branch uses whichever scheme suits it."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "At a high level, what makes TAGE predictors so accurate?",
+    "a": "**TAGE (TAgged GEometric history length)** uses multiple tagged tables indexed with *geometrically increasing* global-history lengths (e.g. 5, 10, 20, 40… bits). Each entry has a tag for partial-match confirmation; the predictor uses the **matching entry with the longest history**, capturing both short- and very-long-range correlations while allocating long-history entries only when shorter ones mispredict."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What does a Branch Target Buffer (BTB) store, and why is it needed even when the direction predictor says 'taken'?",
+    "a": "**The BTB is a cache, indexed by branch PC, holding the predicted target address** (and often the branch type) of recently seen branches. Even knowing a branch is taken, the pipeline doesn't know *where* to fetch next in the `IF` stage before decode; the **BTB supplies the target in the fetch cycle**, enabling zero-bubble redirection of the front end."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why does a Return Address Stack (RAS) outperform a BTB for predicting function returns?",
+    "a": "**Returns are indirect branches whose target varies by call site, so a BTB (one target per branch PC) mispredicts when a function is called from many places.** The **RAS** is a hardware stack: a `call` pushes the return address and a `ret` pops it, so the predicted target matches the actual caller each time, giving near-perfect return prediction for properly nested calls."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Compute the effective CPI penalty: 15% of instructions are branches, the predictor is 92% accurate, and a misprediction costs 12 cycles. How many extra cycles per instruction does mispredicting add?",
+    "a": "**0.144 extra cycles per instruction.** Mispredict rate per instruction = 0.15 x (1 - 0.92) = 0.15 x 0.08 = 0.012; times the 12-cycle penalty = `0.012 x 12 = 0.144`. So CPI rises by about 0.144 due to branch mispredictions."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What microarchitectural state must be recovered on a branch misprediction, and why does deeper/wider pipelining raise the penalty?",
+    "a": "**Recovery flushes wrong-path instructions and restores fetch state:** squash all younger in-flight instructions, restore the PC to the correct target, and roll back speculative structures (GHR, RAS pointer, and rename/map state in OoO cores). The **penalty grows with the number of pipeline stages between fetch and branch resolution**, so deeper pipes (more cycles to resolve) and wider fetch (more instructions per cycle) mean more instructions discarded per mispredict."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why is the global history register updated speculatively, and what must happen to it on a misprediction?",
+    "a": "**Speculative GHR update is needed for accuracy of back-to-back branches.** If the GHR waited for each branch to retire, closely-spaced branches would index with stale history. The predictor therefore updates the GHR with the *predicted* outcome at fetch; on a misprediction the **GHR must be repaired/rolled back** to the architecturally correct history (e.g. via a checkpoint) so subsequent predictions aren't corrupted."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is superpipelining, and what limits how deep a pipeline can usefully go?",
+    "a": "**Superpipelining** divides the datapath into more, finer stages so the clock period shrinks toward a single gate-delay-dominated critical path, raising frequency. Returns diminish because **per-stage pipeline-register setup/hold and clock-skew overhead become a larger fraction of each shorter cycle**, branch-misprediction and load-use penalties grow (more stages to traverse), and power/clocking cost rises — so beyond a sweet spot, deeper pipes hurt performance."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "In an in-order pipeline, why does a single long-latency cache miss stall the entire machine, and how does out-of-order execution avoid this?",
+    "a": "**In-order issue stalls at the first instruction whose operands aren't ready**, so a load miss blocks every younger instruction even if they are independent. **Out-of-order execution** lets independent younger instructions issue and execute around the stalled load (dynamic scheduling), exposing **memory-level and instruction-level parallelism**; results are still committed in program order."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Name the three classes of data hazards and state which ones register renaming eliminates.",
+    "a": "**RAW (read-after-write)** is a true data dependence and cannot be removed — it reflects real data flow. **WAR (write-after-read)** and **WAW (write-after-write)** are *false* (name) dependences caused by reusing architectural register names; **register renaming eliminates both WAR and WAW** by mapping each write to a fresh physical register."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What problem does Tomasulo's algorithm solve, and what are its three core hardware structures?",
+    "a": "**Tomasulo's algorithm** performs dynamic scheduling with register renaming to execute instructions out of order while honoring true dependences. Its core structures are **reservation stations** (buffer operands/ops per functional unit), the **common data bus (`CDB`)** (broadcasts results to all waiting stations), and the **register status / tag fields** that rename architectural registers to producing stations."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "In Tomasulo, how does a reservation station know whether an operand is a ready value or still pending, and how does it capture the value when it appears?",
+    "a": "Each source has a **value field (`Vj`/`Vk`)** and a **tag/Q field (`Qj`/`Qk`)**. If the tag is zero the value in `Vj`/`Vk` is valid; if nonzero the operand is waiting on the station whose tag matches. When a result is **broadcast on the `CDB`**, every station compares the `CDB` tag to its `Qj`/`Qk`; on a match it latches the value and clears the tag."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is the role of the common data bus (CDB) in Tomasulo, and why can it become a structural bottleneck?",
+    "a": "The **`CDB` broadcasts a completed result plus its tag** simultaneously to the register file and all reservation stations, enabling renaming and operand forwarding in one step. With a **single `CDB` only one result can be written back per cycle**, so multiple functional units finishing the same cycle must arbitrate — limiting effective completion width unless more `CDB`s are added."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Compare scoreboarding (CDC 6600) with Tomasulo: which hazards does each handle and how?",
+    "a": "**Scoreboarding** centrally tracks instruction/register status and stalls on WAR/WAW (no renaming); it delays writeback (WAR) and issue (WAW) when a name hazard exists. **Tomasulo** uses **distributed reservation stations and register renaming via tags**, so it eliminates WAR/WAW entirely and forwards results over the `CDB` rather than stalling. Classic scoreboarding has no result-broadcast bus; values pass through the register file."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why does basic Tomasulo (as in the IBM 360/91) not provide precise exceptions, and what structure fixes this?",
+    "a": "Basic Tomasulo lets instructions **write results to the register file out of order**, so when an exception is detected the architectural state reflects partially completed younger instructions. Adding a **reorder buffer (ROB)** with **in-order commit** fixes this: results are held in the ROB and written to architectural state only in program order, giving **precise exceptions**."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is the reorder buffer (ROB) and what two main jobs does it perform in a modern OoO core?",
+    "a": "The **ROB** is a circular FIFO holding instructions from dispatch until retirement in program order. Its jobs: (1) **enforce in-order commit/retire** so architectural state and exceptions are precise, and (2) **track speculative state** (results, or pointers to physical registers) so a misprediction or fault can be squashed by flushing ROB entries younger than the offending instruction."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Define a precise exception and explain why out-of-order machines must work to guarantee it.",
+    "a": "A **precise exception** means that when an exception is taken, all instructions before the faulting one have fully completed and none after it have modified architectural state, so the saved PC/state is exactly restartable. OoO cores complete instructions out of order, so they use **in-order commit via the ROB** to reconstruct this clean boundary; otherwise virtual memory, context switch, and restart would be impossible."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Distinguish the dispatch, issue, execute, and commit (retire) stages in a modern OoO pipeline.",
+    "a": "**Dispatch**: in-order allocation — rename, allocate ROB/LSQ/RS entries. **Issue (wakeup/select)**: out-of-order — an instruction whose operands are ready is selected and sent to a functional unit. **Execute**: the FU computes the result and broadcasts/writes back. **Commit/retire**: in-order — the oldest completed instruction updates architectural state and frees resources."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "In a physical-register-file (PRF) renaming scheme, what does the rename map table hold and what happens to physical registers at commit?",
+    "a": "The **rename (map) table** maps each architectural register to the **physical register currently holding its value**; a new write allocates a free physical register and updates the map. At **commit**, the *previous* physical register that the architectural name pointed to is returned to the **free list**, since no in-flight instruction can still need it."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Contrast the two main register-renaming organizations: ROB-based (result-in-ROB) vs. unified physical register file.",
+    "a": "In **ROB-based renaming**, speculative results live in ROB entries and are copied to the architectural register file at commit (e.g., Intel P6 / Pentium Pro). In a **unified PRF**, one large physical register file holds both speculative and committed values; renaming remaps architectural names and commit only updates a map/pointer — **no value copy**, which scales better (e.g., MIPS R10000, DEC Alpha 21264, modern x86)."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Compute the minimum number of physical registers a machine needs if it must support up to 128 in-flight instructions over 32 architectural registers, assuming each in-flight instruction has one destination.",
+    "a": "You need enough to hold **all 32 committed architectural values plus one destination per in-flight instruction**. Minimum physical registers = **32 + 128 = 160**. Fewer than this stalls rename because the free list empties; this is why deep windows demand large PRFs."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is a superscalar processor, and what hardware cost grows roughly quadratically with issue width?",
+    "a": "A **superscalar** processor fetches, decodes, and issues **multiple instructions per cycle** using dynamic hardware scheduling. The **operand-bypass network and wakeup/dependency-check logic** scale roughly with the **square of issue width** (each of W results may broadcast to W consumers, and W instructions cross-check each other), a key reason issue widths plateaued."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Compare VLIW and superscalar execution: where is the scheduling done and what are the trade-offs?",
+    "a": "**Superscalar**: hardware discovers parallelism and schedules dynamically at runtime — adapts to variable latencies but costly logic. **VLIW**: the **compiler packs independent operations into a fixed-width long instruction word**; hardware is simpler but the binary is sensitive to latency changes and needs recompilation, and code density suffers from `NOP`s. VLIW relies on static ILP; superscalar exploits dynamic ILP."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "In speculative OoO execution, what determines when speculation is resolved, and how is a wrong-path branch recovered?",
+    "a": "Speculation is resolved when the **branch executes and its actual direction/target is known**, compared against the prediction. On a misprediction, the core **squashes all instructions younger than the branch** (flush ROB/RS/LSQ entries), **restores the rename map** (from a checkpoint or by walking the ROB), redirects fetch to the correct PC, and resumes."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why is fast rename-map recovery on a branch misprediction important, and what two techniques implement it?",
+    "a": "Misprediction recovery must restore the rename table to the branch's point quickly, or recovery latency dominates the penalty. Techniques: (1) **checkpointing** — snapshot the map table at each branch and restore in one step (fast, area-costly per branch), and (2) **ROB walk / rollback** — sequentially undo map updates of squashed instructions (cheaper, slower)."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is the load/store queue, and why is memory disambiguation harder than register dependence tracking?",
+    "a": "The **load/store queue (LSQ)** holds in-flight memory ops to enforce ordering and forward store data to dependent loads. Disambiguation is hard because a memory dependence is **between addresses not known until address generation executes**, unlike register names known at decode — so the hardware must dynamically compare computed addresses to decide if a load aliases an older store."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Explain store-to-load forwarding and when it must be suppressed.",
+    "a": "**Store-to-load forwarding** lets a younger load read its data directly from an older in-flight store in the store queue (matching address) instead of waiting for the store to reach cache. It must be **suppressed (load stalls or replays)** when an older store's address is still unknown (possible alias) or when the addresses overlap only partially / with mismatched size, forcing the load to wait."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is a memory order violation under speculative load scheduling, and how is it detected and recovered?",
+    "a": "It occurs when a load **speculatively executes before an older store to the same address**, reading stale data. It's detected when the store later computes its address and finds a **younger already-executed load that aliases it** (via the LSQ). Recovery **squashes the offending load (and its dependents)** and replays it; **memory-dependence predictors** reduce how often loads speculate ahead."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why does enlarging the instruction window give diminishing ILP returns, and what scales poorly as the window grows?",
+    "a": "ILP is bounded by the **program's true-dependence critical path and branch resolution**, so beyond a point a bigger window finds few extra independent instructions. Meanwhile **wakeup/select logic, the PRF, the LSQ CAM, and rename ports** scale super-linearly in area/power, and the **CAM/broadcast latency** can lengthen the cycle — so cost rises faster than performance."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "What is simultaneous multithreading (SMT), and how does it differ from coarse-grained and fine-grained multithreading?",
+    "a": "**SMT** issues instructions from **multiple hardware threads in the same cycle** to a single OoO core's functional units, filling both horizontal (unused issue slots) and vertical (stall-cycle) waste. **Fine-grained** switches threads every cycle (one thread per cycle); **coarse-grained** switches only on long stalls. Only SMT mixes instructions from different threads within one issue cycle."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "In an SMT core, which resources are typically replicated per thread versus shared, and what's the main downside of sharing?",
+    "a": "**Replicated/private**: architectural register state, rename map, PC, and return-address stack. **Shared (tagged by thread)**: physical register file, reservation stations/issue queue, functional units, caches, TLB, and often the ROB. The downside is **inter-thread contention** — one thread can hog the issue queue, PRF, or cache, degrading another thread (and creating timing side channels)."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Given a 3-wide OoO core, a 64-entry ROB, and code where every 8th instruction is a hard-to-predict branch with a 15-cycle mispredict penalty resolved at ~50% accuracy, why won't a larger ROB help much?",
+    "a": "With **50% accuracy on a branch every 8 instructions**, the machine mispredicts roughly every ~16 instructions and pays 15 cycles each, so it almost never fills the 64-entry ROB before a flush. Performance is **branch-resolution-bound, not window-bound** — improving the predictor or branch-resolution latency helps; a bigger ROB just buffers instructions that get squashed."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Spot the bug: a designer frees a destination's old physical register at *writeback* (execute completion) instead of at commit. What breaks?",
+    "a": "It breaks **misprediction/exception recovery and correctness**. The old physical register may still hold the architectural value needed if the writing instruction is squashed, or wrong-path readers may still reference it; freeing at writeback can let it be **reallocated and overwritten before commit**, corrupting recovery. The old physical register must be freed **only at in-order commit**, when the new value is guaranteed architectural."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why must the issue queue's wakeup-select loop ideally complete in a single cycle, and what happens to back-to-back dependent instructions if it cannot?",
+    "a": "Wakeup (broadcasting a result's tag to dependents) and select (picking ready instructions) form a **critical atomic loop**; if it spans multiple cycles, a consumer cannot issue the cycle after its producer. That inserts a **bubble between back-to-back dependent ops**, lengthening the dependence chain's effective latency and directly cutting IPC — which is why this loop is a key cycle-time limiter in OoO design."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "How does a branch target buffer (BTB) differ from a direction predictor, and why are both needed in the fetch stage?",
+    "a": "The **BTB** caches the **target address** of taken branches indexed by PC, so the front end can redirect fetch *in the fetch cycle* before decode reveals the instruction is a branch. A **direction predictor** (e.g., a `gshare`/TAGE scheme) predicts **taken vs. not-taken** for conditional branches. Both are needed: the direction predictor decides *whether* to branch, the BTB supplies *where* to go without waiting for target computation."
+  },
+  {
+    "topic": "PIPELINE",
+    "q": "Why are returns predicted with a return address stack (RAS) rather than a BTB, and when does the RAS mispredict?",
+    "a": "A subroutine can be **called from many sites**, so a single BTB entry for the `ret` would alias across callers. The **return address stack (RAS)** instead pushes the return address on each `call` and pops it on each `ret`, matching the call/return nesting exactly. It **mispredicts on RAS overflow** (very deep recursion exceeding its depth) or when call/return pairing is broken (e.g., setjmp/longjmp or mismatched tail calls)."
+  },
+  {
+    "topic": "OS",
+    "q": "What state is shared among threads of one process versus private per thread?",
+    "a": "**Shared across threads:** the address space (code, heap, global/static data), open file descriptors, and process-wide signal *dispositions*/handlers. **Private per thread:** the register set (including program counter), the stack, `errno`, and the signal *mask*. Because the page tables are shared, two threads never need a TLB flush to see each other's memory."
+  },
+  {
+    "topic": "OS",
+    "q": "Name the standard segments of a process address space, lowest to highest virtual address.",
+    "a": "**Text/code** (read-only instructions), then **data** (initialized globals) and **BSS** (zero-initialized globals), then the **heap** growing upward, then the **stack** growing downward from high addresses; on most systems the **kernel** is mapped in the highest region (inaccessible from user mode). The gap between heap and stack lets both grow."
+  },
+  {
+    "topic": "OS",
+    "q": "Why is a thread context switch cheaper than a process context switch?",
+    "a": "**A process switch must change the address space:** it reloads the page-table base register (`CR3` on x86 / `TTBR` on ARM), which on untagged TLBs flushes TLB entries and pollutes caches, costing many subsequent misses. A thread switch within the same process keeps the same page tables, so it only saves/restores registers and the stack pointer. (`PCID`/ASIDs can avoid the full flush.)"
+  },
+  {
+    "topic": "OS",
+    "q": "List the direct and indirect costs of a context switch.",
+    "a": "**Direct cost:** saving/restoring register state plus the scheduler's bookkeeping (run-queue manipulation), typically on the order of ~1 microsecond. **Indirect cost:** cold caches and TLB after the switch, causing extra cache/TLB misses on resume — this often dominates and can be far larger than the direct cost."
+  },
+  {
+    "topic": "OS",
+    "q": "What exactly happens at the user-to-kernel boundary during a system call?",
+    "a": "**A trap instruction** (e.g. `syscall` on x86-64, `svc` on ARM) raises privilege from user mode to kernel mode, switches to the kernel stack, and vectors to a fixed handler that dispatches on the syscall number. Arguments pass in registers; the CPU's privilege level gates access to protected instructions and memory. On return (`sysret`/`eret`), privilege drops back to user mode."
+  },
+  {
+    "topic": "OS",
+    "q": "Why must a system call be a trap rather than an ordinary function call?",
+    "a": "**A function call cannot raise privilege.** User code runs with restricted permissions; only a controlled trap/exception lets the CPU enter kernel (supervisor) mode at a kernel-defined entry point. This prevents user code from jumping into the middle of kernel routines and bypassing checks — the hardware forces entry through the trap vector."
+  },
+  {
+    "topic": "OS",
+    "q": "Compare FCFS and SJF scheduling with respect to average waiting time and starvation.",
+    "a": "**SJF minimizes average waiting time** (provably optimal among non-preemptive policies for a fixed set of jobs available at time 0), while **FCFS** can suffer the convoy effect where short jobs wait behind one long job. The tradeoff: SJF can **starve** long jobs and requires knowing/estimating burst length, whereas FCFS is starvation-free and trivial to implement."
+  },
+  {
+    "topic": "OS",
+    "q": "What is SRTF and how does it differ from SJF?",
+    "a": "**SRTF (Shortest Remaining Time First)** is the preemptive version of SJF: when a new job arrives with a shorter remaining burst than the running job, it preempts. It further lowers average waiting time versus non-preemptive SJF but adds context-switch overhead and still can starve long jobs."
+  },
+  {
+    "topic": "OS",
+    "q": "In round-robin scheduling, how does the time quantum affect behavior at its extremes?",
+    "a": "**A very large quantum** makes RR degenerate into FCFS (each job runs to completion before yielding). **A very small quantum** gives near-ideal fairness/responsiveness but context-switch overhead dominates throughput. The quantum should be large relative to switch cost but small enough for good interactive response (commonly ~10-100 ms)."
+  },
+  {
+    "topic": "OS",
+    "q": "How does a multilevel feedback queue (MLFQ) approximate SJF without knowing burst lengths?",
+    "a": "**MLFQ infers job type from observed behavior.** A job starts in the highest-priority queue; if it uses its full quantum (CPU-bound) it is demoted to a lower-priority, longer-quantum queue, while jobs that yield early (I/O-bound) stay high. Periodic priority boosting prevents starvation. This naturally favors short/interactive jobs like SJF would."
+  },
+  {
+    "topic": "OS",
+    "q": "What metric does Linux CFS use to decide which task runs next, and how?",
+    "a": "**CFS tracks per-task `vruntime` (virtual runtime)** and always picks the runnable task with the smallest `vruntime`, stored in a red-black tree keyed by `vruntime`. A task's `vruntime` advances in proportion to real runtime divided by its weight (from `nice`), so lower-priority tasks accumulate `vruntime` faster and run less. There is no fixed timeslice — the goal is equal weighted CPU share."
+  },
+  {
+    "topic": "OS",
+    "q": "How does the `nice` value influence CPU share under CFS?",
+    "a": "**`nice` maps to a weight; CFS gives each task CPU proportional to its weight.** Each step in `nice` changes weight by roughly 1.25x, so one `nice` level is about a 10% change in CPU share, and a 10-level difference is roughly a 10x ratio. Lower `nice` (e.g. -20) = higher weight = larger share."
+  },
+  {
+    "topic": "OS",
+    "q": "Distinguish preemptive from cooperative scheduling and give the failure mode of each.",
+    "a": "**Preemptive:** the kernel can forcibly suspend a running task on a timer interrupt, guaranteeing responsiveness but requiring careful synchronization since a task can be stopped anywhere. **Cooperative:** tasks run until they voluntarily yield/block; it's simpler and needs no locks for in-task data, but one misbehaving task that never yields hangs the whole system."
+  },
+  {
+    "topic": "OS",
+    "q": "Compare a mutex and a spinlock, including when each is appropriate.",
+    "a": "**A mutex blocks** (the waiter sleeps and the CPU is rescheduled), so it suits potentially long or contended critical sections and can be held across blocking calls. **A spinlock busy-waits** in a tight loop, wasting CPU but avoiding the sleep/wake overhead, so it suits very short critical sections on multiprocessors. Spinlocks must never sleep while held and are the right choice in interrupt context where blocking is illegal."
+  },
+  {
+    "topic": "OS",
+    "q": "Why is spinning on a uniprocessor (with no preemption) for a lock held by another thread pointless?",
+    "a": "**On a single CPU the lock holder is not running while the spinner spins**, so the spinner just burns the entire quantum and can never make progress; the holder only runs once the spinner is descheduled. Spinlocks pay off only when the holder can run concurrently on another core to release the lock quickly."
+  },
+  {
+    "topic": "OS",
+    "q": "Compare a counting semaphore, a binary semaphore, and a mutex.",
+    "a": "**A counting semaphore** holds an integer count and admits up to N concurrent holders (resource pool). **A binary semaphore** is a count capped at 1, usable as a signaling/lock primitive. **A mutex** is a binary lock with ownership: only the thread that locked it may unlock it, enabling priority inheritance and detecting misuse — a semaphore has no owner and can be posted by any thread."
+  },
+  {
+    "topic": "OS",
+    "q": "Why must a condition variable always be used with a mutex and a while-loop predicate check?",
+    "a": "**The mutex protects the shared predicate and makes wait-and-release atomic**, avoiding the lost-wakeup race where a signal fires between testing the predicate and sleeping. The `while` (not `if`) re-checks the predicate on wakeup to handle **spurious wakeups** and the case where another thread consumed the condition before this one ran. `wait()` atomically releases the mutex and re-acquires it on return."
+  },
+  {
+    "topic": "OS",
+    "q": "What is a monitor and how does it relate to mutexes and condition variables?",
+    "a": "**A monitor is a high-level construct that bundles shared data with procedures under automatic mutual exclusion** — only one thread executes inside the monitor at a time — plus condition variables for waiting. It is essentially a mutex (auto-acquired on entry, released on exit) combined with CVs; Java's `synchronized` plus `wait`/`notify` is a monitor."
+  },
+  {
+    "topic": "OS",
+    "q": "What three requirements must any valid solution to the critical-section problem satisfy?",
+    "a": "**Mutual exclusion** (at most one thread in the critical section), **progress** (if no one is in the CS, selection of the next entrant cannot be postponed indefinitely by threads not contending), and **bounded waiting** (a bound exists on how many times others enter after a thread requests entry, so no starvation)."
+  },
+  {
+    "topic": "OS",
+    "q": "What is the key idea behind Peterson's algorithm for two-thread mutual exclusion?",
+    "a": "**It combines a `flag[]` array (intent to enter) with a `turn` variable that yields priority to the other thread.** A thread enters only when the other isn't interested or it isn't the other's turn. Setting `turn` to the other thread after raising your own flag breaks ties and guarantees mutual exclusion, progress, and bounded waiting — but it assumes sequentially consistent memory, so real CPUs need memory fences."
+  },
+  {
+    "topic": "OS",
+    "q": "State the four Coffman conditions for deadlock and the principle behind prevention.",
+    "a": "**Mutual exclusion, hold-and-wait, no preemption, and circular wait** must all hold simultaneously for deadlock. **Prevention** works by structurally negating at least one — e.g. impose a global lock-ordering to eliminate circular wait, or require acquiring all resources at once to remove hold-and-wait. Breaking any single condition makes deadlock impossible."
+  },
+  {
+    "topic": "OS",
+    "q": "What does the Banker's algorithm check, and how does avoidance differ from prevention and detection?",
+    "a": "**Banker's algorithm grants a resource request only if the resulting state is *safe*** — i.e. there exists some sequence in which every process can finish given maximum claims (found via the safety check on `Need`, `Available`, `Allocation`). **Avoidance** uses such advance knowledge to stay safe; **prevention** negates a Coffman condition outright; **detection** allows deadlock then finds cycles and recovers. Avoidance needs each process's maximum resource need declared up front."
+  },
+  {
+    "topic": "OS",
+    "q": "Define priority inversion, give the classic scenario, and explain how priority inheritance fixes it.",
+    "a": "**Priority inversion:** a high-priority task is blocked on a lock held by a low-priority task, while a medium-priority task preempts the low one — so the medium task effectively outranks the high one (the Mars Pathfinder bug). **Priority inheritance** fixes it by temporarily raising the lock holder's priority to that of the highest waiter, so it runs, releases the lock, and unblocks the high-priority task promptly."
+  },
+  {
+    "topic": "OS",
+    "q": "What is the difference between internal and external fragmentation, and which allocation scheme causes which?",
+    "a": "**Internal fragmentation** is wasted space *inside* a fixed-size allocation unit (e.g. the unused tail of the last page in paging, or a slab/block bigger than the request). **External fragmentation** is free memory split into scattered chunks too small to satisfy a request despite enough total free space — the hallmark of variable-size contiguous allocation (segmentation). **Paging eliminates external fragmentation** (any frame fits any page) at the cost of some internal fragmentation."
+  },
+  {
+    "topic": "OS",
+    "q": "In demand paging, what does a page table entry's valid/invalid bit signify, and how does the hardware use it to trigger a page fault?",
+    "a": "**The valid/invalid (present) bit** marks whether a page is currently resident in a physical frame. On every memory reference the MMU checks it; if `valid`, translation proceeds, but if `invalid`, the MMU raises a **page-fault trap** to the OS. The same invalid encoding can mean either \"not in memory but legal\" (fault it in) or \"not in the address space\" (segfault), which the OS distinguishes via its own metadata."
+  },
+  {
+    "topic": "OS",
+    "q": "List the ordered steps the OS performs to service a page fault for a page that is legal but not resident.",
+    "a": "**Page-fault handling path:** (1) trap to OS, save state; (2) check internal table — legal reference vs invalid (kill if illegal); (3) find a free frame (else run page replacement to evict a victim); (4) schedule a disk/backing-store read of the page into that frame; (5) on I/O completion, update the page table (set `valid`, frame number) and free-frame list; (6) restart the faulting instruction. The faulted process blocks during the disk I/O."
+  },
+  {
+    "topic": "OS",
+    "q": "Why must demand-paging hardware support restarting an instruction mid-execution, and what is a problematic example?",
+    "a": "**Instruction restart** is required because a fault can occur partway through a multi-operand instruction, and the OS must re-execute it from scratch after fetching the page. The classic hard case is a **block-move (e.g., MVC) with overlapping source/destination**: if a fault occurs after partial copying, naive restart corrupts data. Fixes include pre-touching both ends of each operand before the move, or using temporary registers to hold/undo partial state."
+  },
+  {
+    "topic": "OS",
+    "q": "Compute the effective access time (EAT) for demand paging given memory access = 200 ns, page-fault service = 8 ms, and page-fault rate p.",
+    "a": "**EAT = (1 − p)·200 ns + p·8,000,000 ns.** Each page fault costs ~8 ms = 8,000,000 ns, so even tiny `p` dominates. For EAT to stay within 10% of 200 ns (≤220 ns), you need `p·8,000,000 ≤ 20`, i.e. `p ≤ 2.5×10⁻⁶` — roughly one fault per 400,000 accesses. This illustrates why low fault rates are essential."
+  },
+  {
+    "topic": "OS",
+    "q": "What is a TLB, and how does it interact with the page table on a hit, a miss, and a page fault?",
+    "a": "**The TLB (Translation Lookaside Buffer)** is a small associative cache of recent virtual-to-physical page translations inside the MMU. On a **hit**, the physical frame is obtained without consulting the in-memory page table. On a **miss**, the page table is walked (by hardware or a software handler) and the entry is loaded into the TLB. If the located PTE is `invalid`, a **page fault** is raised. Effective access time is governed by the **hit ratio**: EAT = hit_ratio·(TLB + mem) + miss_ratio·(TLB + 2·mem)."
+  },
+  {
+    "topic": "OS",
+    "q": "Give the canonical Belady's-anomaly example: which reference string under FIFO produces more faults with 4 frames than with 3?",
+    "a": "**Canonical Belady example:** the reference string `1,2,3,4,1,2,5,1,2,3,4,5` under FIFO produces **9 faults with 3 frames** but **10 faults with 4 frames** — more frames, more faults. This is the textbook demonstration that FIFO is not a stack algorithm and violates the intuitive monotonicity of fault rate vs frame count."
+  },
+  {
+    "topic": "OS",
+    "q": "Define Belady's anomaly and name which page-replacement algorithms are immune to it.",
+    "a": "**Belady's anomaly** is the counterintuitive phenomenon where increasing the number of frames *increases* the page-fault count for some reference strings (notably under FIFO). **Stack algorithms** are provably immune because the set of pages held in n frames is always a subset of the set in n+1 frames. `LRU` and `OPT` are stack algorithms and never suffer the anomaly; `FIFO` and second-chance/`Clock` can."
+  },
+  {
+    "topic": "OS",
+    "q": "Why is OPT (Belady's optimal) replacement unimplementable in practice, and what is it used for?",
+    "a": "**OPT evicts the page whose next use is furthest in the future**, giving the provably minimal fault count, but it requires knowledge of the future reference string, which is unavailable at runtime. It is therefore used only as a **theoretical lower bound / benchmark** to measure how close practical algorithms (LRU, Clock) come to optimal on a given trace."
+  },
+  {
+    "topic": "OS",
+    "q": "Contrast the two hardware-assisted implementations of true LRU (counters vs stack) and why both are rarely deployed.",
+    "a": "**LRU implementations:** (1) **Counters** — each PTE stores a timestamp/clock copied on every access; eviction scans for the smallest, an O(n) search plus a memory write per reference. (2) **Stack** — maintain a doubly-linked list of page numbers, moving the referenced page to the top on each access (O(1) eviction at bottom, but pointer updates per reference). Both need a memory update on *every* reference, so without dedicated hardware they are too costly; real systems use approximations like Clock."
+  },
+  {
+    "topic": "OS",
+    "q": "Explain the second-chance (Clock) algorithm and how it approximates LRU using a single reference bit.",
+    "a": "**Second-chance/Clock** keeps frames in a circular list with a moving hand and one **reference bit** per page (set by hardware on access). To pick a victim, the hand inspects the pointed page: if its reference bit is 0, evict it; if 1, clear the bit (give a \"second chance\") and advance. This approximates LRU — recently used pages survive at least one sweep — while costing only a single bit and a pointer scan, far cheaper than true LRU."
+  },
+  {
+    "topic": "OS",
+    "q": "How does the enhanced second-chance algorithm use the (reference, modify) bit pair to choose a victim?",
+    "a": "**Enhanced second-chance** classifies pages by the ordered pair `(reference, modify)`: (0,0) best — not used, not dirty, evict free; (0,1) not recently used but dirty (must write back); (1,0) recently used, clean; (1,1) recently used and dirty, worst. The algorithm sweeps in priority order and prefers the lowest non-empty class, biasing eviction toward **clean, unreferenced** pages to avoid the cost of writing dirty pages."
+  },
+  {
+    "topic": "OS",
+    "q": "Describe the NRU (Not Recently Used) algorithm and how its classes relate to enhanced second-chance.",
+    "a": "**NRU** periodically clears all reference bits, then on a fault classifies each page into four classes by `(referenced, modified)`: Class 0 (0,0), Class 1 (0,1), Class 2 (1,0), Class 3 (1,1). It evicts a (random) page from the **lowest-numbered non-empty class**, favoring not-recently-referenced and clean pages. It is a coarse, periodic-reset cousin of enhanced second-chance with much lower bookkeeping."
+  },
+  {
+    "topic": "OS",
+    "q": "Compare LFU and MFU replacement and give a failure mode of each.",
+    "a": "**LFU (Least Frequently Used)** evicts the page with the smallest access count, assuming low frequency means low future use; its failure mode is a page heavily used during startup that accumulates a huge count and then stays resident forever (stale). **MFU** evicts the *most* frequently used page, arguing a low-count page was just brought in and still needed; its failure mode is evicting genuinely hot pages. Both poorly approximate locality and are rare in practice; LFU needs count **aging** to be usable."
+  },
+  {
+    "topic": "OS",
+    "q": "Define the working-set model: what are the parameters Δ and WSS, and how is total demand computed?",
+    "a": "**Working-set model:** the working set `WS(t)` is the set of pages referenced in the most recent **working-set window** Δ (a count of references). `WSSᵢ` is the size of process i's working set, approximating its locality. The total frame demand is `D = Σ WSSᵢ`; if `D > m` (available frames), the system is over-committed and will **thrash**, so the OS should suspend a process to drive `D` down."
+  },
+  {
+    "topic": "OS",
+    "q": "What is thrashing, why does it cause a CPU-utilization collapse, and what feedback loop makes it worse?",
+    "a": "**Thrashing** is when processes spend more time paging than executing because each lacks enough frames to hold its working set, so every reference faults. CPU utilization drops as processes block on disk I/O; a naive scheduler reacts by **raising the multiprogramming degree** to use the idle CPU, which steals even more frames and deepens the fault storm — a positive feedback collapse. The fix is working-set or page-fault-frequency control to bound multiprogramming."
+  },
+  {
+    "topic": "OS",
+    "q": "Explain the Page-Fault Frequency (PFF) scheme as an alternative to working-set tracking.",
+    "a": "**PFF** directly controls thrashing by monitoring each process's fault rate against an **upper and lower threshold**. If the rate exceeds the upper bound, the process gets *more* frames; if it drops below the lower bound, frames are *removed*. This regulates allocation toward the working set without explicitly computing it; if no free frames exist when a process needs more, a process is suspended/swapped out."
+  },
+  {
+    "topic": "OS",
+    "q": "Compare local vs global page replacement, and give the key drawback of global replacement.",
+    "a": "**Local replacement** restricts a faulting process to evicting only its *own* frames, so its fault behavior is independent of other processes but it cannot exploit lightly-used frames elsewhere. **Global replacement** lets a process evict any process's frame, generally yielding higher throughput, but its drawback is **non-deterministic per-process performance** — one process's paging depends on others' behavior, and it is the configuration that enables thrashing."
+  },
+  {
+    "topic": "OS",
+    "q": "Given 62 free frames, 3 processes of sizes 10, 127, and 256 pages, compute proportional frame allocation.",
+    "a": "**Proportional allocation** gives frames in proportion to virtual size: total = 10+127+256 = 393. Process i gets `aᵢ = (sᵢ/Σs)·m`. With m=62: 10·(62/393)≈1.6→~2, 127·(62/393)≈20, 256·(62/393)≈40. (Each is floored/rounded with a minimum to keep a process runnable.) Equal allocation would instead give ~20 frames each regardless of size, starving the 256-page process relative to its need."
+  },
+  {
+    "topic": "OS",
+    "q": "What is copy-on-write (COW), and walk through what happens on the first write after fork().",
+    "a": "**Copy-on-write** lets parent and child after `fork()` share the same physical frames, all marked **read-only**, deferring duplication. On the first write, the MMU raises a protection fault; the OS allocates a fresh frame, **copies the page's contents** into it, marks the copies writable in the respective page tables, and restarts the write. This avoids copying pages that are never modified (and is why `fork()` + `exec()` is cheap); the fresh frame is typically taken from a free-frame pool."
+  },
+  {
+    "topic": "OS",
+    "q": "Distinguish prepaging, page buffering, and demand paging as strategies around the page-fault path.",
+    "a": "**Demand paging** brings a page in only when faulted (zero startup cost, more faults). **Prepaging** proactively loads pages expected to be needed (e.g., a process's working set on resume) to cut fault count — wasteful if predictions are wrong. **Page buffering** keeps a pool of free frames so a fault is satisfied *immediately* from the pool while the victim is written back asynchronously; it also remembers evicted pages' contents to reclaim them cheaply if re-referenced before reuse."
+  },
+  {
+    "topic": "OS",
+    "q": "How do memory-mapped files use the demand-paging machinery, and how is mmap I/O different from read()/write()?",
+    "a": "**Memory-mapped files** (`mmap`) map a file's blocks into the address space so accessing memory faults the corresponding file pages in via the normal page-fault path; writes go to the page cache and are flushed lazily (or on `msync`). Unlike `read()`/`write()`, which copy through a syscall and a separate buffer each call, mmap avoids per-access syscalls and double-buffering, and lets multiple processes **share** the same mapped pages for IPC."
+  },
+  {
+    "topic": "OS",
+    "q": "On a GPU with Unified Memory under oversubscription, explain how a page fault is serviced and why eviction policy matters more than on CPUs.",
+    "a": "**GPU UM page fault:** when an SM (or CPU) touches a non-resident page, the GMMU raises a fault; the driver/runtime migrates the page over the interconnect (e.g., PCIe/NVLink) from host or peer memory, possibly **evicting** a resident GPU page to make room when device memory is oversubscribed. Eviction matters more because migration latency is huge relative to compute and thousands of threads stall on a fault, so a bad victim choice causes **migration thrashing** (ping-ponging pages between host and device)."
+  },
+  {
+    "topic": "OS",
+    "q": "When choosing a GPU Unified Memory eviction victim under oversubscription, why can a strict LRU policy underperform, and what locality/prefetch signals should guide the decision instead?",
+    "a": "**Strict LRU can underperform** because GPU access is massively parallel and often streaming, so recency at single-page granularity poorly predicts reuse and can evict a page about to be prefetched, causing ping-pong. Better policies evict pages with **low spatial/temporal locality** and avoid evicting pages within an active **prefetch range** or tree-based prefetch group; the runtime balances **prefetch-in vs evict-out** so that proactively migrated, soon-to-be-used pages aren't chosen as victims, and prefers cleanly-migratable (non-dirty, host-backed) pages to cut write-back cost."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What does an atomic read-modify-write (RMW) operation guarantee, and why can't you build one from a plain load followed by a plain store?",
+    "a": "**An atomic RMW reads a value, computes a new one, and writes it back as a single indivisible step** with respect to other cores — no other thread can observe or modify the location in between. A separate load+store has a window between the two where another thread can interleave (lost-update race); the hardware (`lock`-prefixed x86 ops, ARM `LDXR`/`STXR` pairs, LL/SC) closes that window."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Define compare-and-swap (CAS) precisely, including what it returns and what it does on failure.",
+    "a": "**`CAS(addr, expected, new)` atomically checks if `*addr == expected`; if so it stores `new` and reports success, otherwise it leaves memory unchanged and reports failure.** Most ISAs/APIs return the *current* value read (compare-exchange semantics) or a boolean plus update `expected` by reference (C++ `compare_exchange_weak/strong`). On failure you typically re-read and retry in a loop."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What is the difference between `compare_exchange_weak` and `compare_exchange_strong` in C++, and when do you use weak?",
+    "a": "**`compare_exchange_weak` may fail spuriously** (return false even when `*addr == expected`), reflecting LL/SC architectures where the store-conditional can fail for unrelated reasons (interrupt, cache eviction, contention). `strong` never fails spuriously. Use `weak` inside a retry loop (you'd loop anyway, so spurious failures are cheap); use `strong` for a one-shot check with no surrounding loop."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Why is fetch-and-add often preferred over a CAS loop for a shared counter under high contention?",
+    "a": "**`fetch_add` is a single unconditional atomic that always succeeds, so it has no software retry loop**; every thread makes progress in bounded hardware attempts. A CAS-loop counter livelocks under contention — threads repeatedly read, compute, and fail CAS as others win, wasting work. On ISAs with a native atomic add (x86 `LOCK XADD`) `fetch_add` is wait-free per op; on LL/SC-only ISAs the compiler may still emit a retry loop, so it is lock-free but not strictly wait-free there."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Describe the ABA problem in a CAS-based algorithm.",
+    "a": "**ABA occurs when a location changes from value A to B and back to A between a thread's read and its CAS, so the CAS succeeds even though the world changed underneath.** Classic case: a Treiber stack pops node A, another thread pops A and a later node then pushes A back; the original thread's CAS on the head sees A and succeeds, splicing in a stale/freed `next` pointer and corrupting the structure."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "How do tagged/versioned pointers fix ABA, and what is their main limitation?",
+    "a": "**You pack a monotonic version counter alongside the pointer and CAS both together** (e.g., a double-width compare-and-swap, `CMPXCHG16B`/`CASP`), so an A→B→A change still bumps the counter and the CAS fails. Limitations: ABA only reappears if the counter *wraps* (made negligible with enough tag bits), it needs a wide atomic plus spare bits, and it does **not** by itself solve safe reclamation (use-after-free) — you still must defer `free`."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Explain how hazard pointers provide safe memory reclamation in a lock-free structure.",
+    "a": "**Each thread publishes the pointers it is about to dereference into per-thread \"hazard\" slots; a node may only be freed when no thread's hazard slot points to it.** A retiring thread adds the node to a private retire list and periodically scans all hazard slots, freeing only unhazarded nodes. This bounds reclaimable garbage to O(threads × hazards) and gives wait-free reclamation, at the cost of a store plus a fence per protected access."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "How does epoch-based reclamation (EBR) decide when memory is safe to free, and what is its key vulnerability?",
+    "a": "**EBR keeps a global epoch counter; each thread announces the epoch it entered before accessing shared data and clears it on exit. Retired nodes from epoch e are reclaimed only once all threads have advanced past e (typically 2–3 epochs later).** Cheap per-access cost (no per-pointer fences). Vulnerability: a thread stalled inside a critical section pins the epoch, so reclamation stalls and garbage grows unboundedly."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What is RCU (Read-Copy-Update) and what is the central trade-off it makes?",
+    "a": "**RCU lets readers traverse shared data with essentially zero synchronization (no locks/atomics on the read side); writers make a copy, update it, publish via a single atomic pointer swap, then wait for a grace period before freeing the old version.** A grace period ends when every pre-existing reader has finished. Trade-off: extremely fast, scalable reads in exchange for expensive, deferred writes and stale data visible to in-flight readers."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "In RCU, what is a 'grace period' and how does it relate to reclaiming old data?",
+    "a": "**A grace period is an interval after which every reader that could have held a reference to the old version has completed its RCU read-side critical section.** Once it elapses (detected via quiescent states — e.g., context switches in classic kernel RCU), no reader can be using the old copy, so the writer may safely free it. `synchronize_rcu()` blocks for one grace period; `call_rcu()` defers the free asynchronously."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Define lock-free, wait-free, and obstruction-free progress guarantees and order them by strength.",
+    "a": "**Obstruction-free**: a thread completes in finite steps if it runs in isolation (no contention). **Lock-free**: *some* thread always makes progress in finite steps system-wide (no global stall, but individual threads can starve). **Wait-free**: *every* thread completes in a bounded number of its own steps (no starvation). Strength order: wait-free ⊃ lock-free ⊃ obstruction-free."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Can a lock-free algorithm starve an individual thread? Why or why not?",
+    "a": "**Yes.** Lock-freedom only guarantees *system-wide* progress — that at any time some thread completes an operation. A single unlucky thread can lose every CAS race to faster threads and retry forever. Only **wait-freedom** rules out per-thread starvation by bounding each thread's step count regardless of others' behavior."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Walk through the push and pop of a Treiber lock-free stack and where it relies on CAS.",
+    "a": "**Push: read `head`, set `new->next = head`, then `CAS(&head, head, new)`; retry on failure. Pop: read `head` (= `t`), read `t->next`, then `CAS(&head, t, t->next)`; retry on failure.** Both spin until their CAS wins. The pop's CAS is the ABA-vulnerable point and the load of `t->next` is a use-after-free hazard unless paired with hazard pointers/EBR."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Why does the Michael-Scott queue use two separate pointers (head and tail) and require enqueuers to sometimes help advance the tail?",
+    "a": "**The MS queue keeps `head` for dequeue and `tail` for enqueue to allow concurrent ops at both ends with a dummy/sentinel node.** Enqueue is two CAS steps: link the new node, then swing `tail`. A thread that sees `tail` lagging (its `next` is non-null) must **help** by CASing `tail` forward before retrying. This cooperative helping keeps the structure lock-free despite the two-step update being non-atomic."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Why does a TTAS (test-and-test-and-set) spinlock scale better than a plain TAS lock?",
+    "a": "**TAS spins by issuing `test_and_set` (a write) repeatedly, so every spin invalidates the cache line on all cores, flooding the interconnect. TTAS first spins on a plain read until the lock looks free, then attempts one `test_and_set`.** The read-spin hits the local cache (shared state), generating no coherence traffic until the lock is released, so contention traffic drops dramatically — though it still has a thundering-herd burst at release."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "How does a ticket lock work and what fairness property does it provide that TAS/TTAS lack?",
+    "a": "**Each thread atomically `fetch_add`s a global `next_ticket` to take a number, then spins until `now_serving` equals its ticket; unlock increments `now_serving`.** This grants the lock in strict FIFO order, giving **fairness/no starvation** (unlike TAS/TTAS which can starve arbitrarily). Downside: all waiters spin on the same `now_serving` line, so release still causes a coherence broadcast to every waiter."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What problem do MCS and CLH locks solve that ticket and TTAS locks do not?",
+    "a": "**They eliminate the all-waiters-spinning-on-one-line problem: each thread spins on a flag specific to its queue position, so a lock release notifies only the single next waiter (O(1) coherence traffic instead of O(n)).** Both form a queue of waiters. This makes them scale on large NUMA/many-core machines where global spin locations cause a coherence storm at every handoff."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Compare MCS and CLH locks in terms of where each waiter spins and queue node ownership.",
+    "a": "**MCS**: a waiter enqueues its *own* node and spins on a flag *inside its own node*; the predecessor sets that flag on release. The queue is an explicit linked list and unlock must handle the empty-successor case with a CAS. **CLH**: a waiter spins on its *predecessor's* node and takes over the predecessor's node on acquisition. On cache-coherent machines the predecessor's flag migrates to the spinner's cache, but on NUMA-without-coherent-cache (NCC-NUMA) CLH spins on a remote line; MCS keeps the spin location always local, so it is preferred there."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What is the core trade-off a reader-writer lock makes, and when does it actually hurt performance?",
+    "a": "**An RW lock allows many concurrent readers or one exclusive writer, trading reduced parallelism on writes for read concurrency.** It hurts when critical sections are very short or read-heavy with frequent acquisition: the shared reader-count atomic itself becomes a contended cache line (the bookkeeping ping-pongs), so a plain mutex or RCU can outperform it. It also risks writer starvation depending on the policy."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Explain how a seqlock works and the restriction it places on readers.",
+    "a": "**A seqlock has an even/odd sequence counter: a writer increments it to odd before writing and to even after; a reader snapshots the seq, reads the data, then re-reads the seq and retries if it changed or was odd.** Writers never block readers (lock-free reads). Restriction: readers must tolerate reading *torn/garbage* data mid-write (so no pointer-chasing into freed memory), and writers still need their own mutual exclusion."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Why are seqlocks well-suited to write-rare, read-mostly small data like a timestamp, but unsafe for a linked list?",
+    "a": "**Seqlock readers may observe a half-updated (torn) snapshot and only detect it afterward via the sequence check, retrying.** For a small POD value (e.g., a 64-bit clock on 32-bit hardware) re-reading is cheap and harmless. For a linked list, a reader could dereference a pointer that the in-progress writer has set to freed/invalid memory *before* the seq check catches it — crashing. Seqlocks require readers to do no unsafe side effects on torn data."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What is exponential backoff in contention management, and what does adding randomized jitter prevent?",
+    "a": "**On a failed CAS/lock attempt, a thread waits before retrying, doubling the wait window each failure (up to a cap), which cuts coherence traffic and gives a contender room to finish.** Randomized jitter (picking a delay uniformly within the window) prevents *synchronization* — without it, threads that backed off together retry simultaneously, re-colliding in lockstep (a thundering herd)."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "In C++ memory ordering, what do `memory_order_acquire` and `memory_order_release` guarantee, and how do they pair?",
+    "a": "**A `release` store ensures all prior writes by that thread are visible to any thread that performs an `acquire` load reading that value; the `acquire` load ensures no subsequent reads/writes are reordered before it.** Together they form a *synchronizes-with* edge, the standard publish/consume handshake (e.g., set up data, then `flag.store(true, release)`; reader does `flag.load(acquire)` then reads the data). Cheaper than `seq_cst`, which additionally imposes a single global total order on all such ops."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What is false sharing and how do you eliminate it?",
+    "a": "**False sharing happens when two threads write to *distinct* variables that fall on the same cache line; the coherence protocol ping-pongs the line between cores even though there is no logical data sharing, tanking throughput.** Fix by padding/aligning each hot variable to its own cache line (e.g., `alignas(64)` or `std::hardware_destructive_interference_size`), or by giving each thread a private copy and combining at the end."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Contrast the map and reduce parallel patterns in terms of data dependencies and output shape.",
+    "a": "**Map applies a function independently to every element (no inter-element dependencies, perfectly parallel, output same size N).** **Reduce combines all elements into a single value using an associative (ideally commutative) operator, forming a dependency tree of depth O(log N) with O(N) work.** Map is embarrassingly parallel; reduce needs a combining tree and a correctness requirement of associativity for safe reordering."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Define inclusive vs exclusive prefix-sum (scan) and give the output for input [3,1,4,2] under each.",
+    "a": "**Inclusive scan**: each output includes the current element → `[3,4,8,10]`. **Exclusive scan**: each output is the sum of all *prior* elements (identity at position 0) → `[0,3,4,8]`. Both compute running aggregates under an associative operator; exclusive is what you want for index/offset computation (e.g., compaction, bucket offsets)."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "Compare Hillis-Steele and work-efficient Blelloch scan by work complexity and depth.",
+    "a": "**Hillis-Steele (naive/inclusive)**: O(N log N) total work, O(log N) depth — step-efficient but does extra work. **Blelloch (work-efficient)**: O(N) total work via an up-sweep (reduce) then down-sweep, O(log N) depth but roughly double the depth of Hillis-Steele (two tree traversals). On a GPU you pick Hillis-Steele when you have abundant threads (latency-bound) and Blelloch when total work/energy (ops/bandwidth) is the bottleneck."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "In Blelloch scan, what do the up-sweep and down-sweep phases each compute?",
+    "a": "**Up-sweep (reduce phase)** builds a balanced binary tree of partial sums bottom-up, leaving the total sum at the root. **Down-sweep** sets the root to the identity, then traverses top-down: at each node it passes its value to the left child and the sum of (its value + old left-child value) to the right child, producing the **exclusive** prefix sums in place. Together: O(N) work, O(log N) depth."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "What characterizes a stencil computation, and why is it bandwidth- and locality-sensitive on GPUs?",
+    "a": "**A stencil updates each element from a fixed local neighborhood pattern (e.g., 5-point: self + 4 neighbors) over a grid, typically iterated over time-steps.** Each input is reused by multiple neighbors' updates, so it has high arithmetic-to-load ratio *only* if you exploit reuse — naive code re-loads neighbors repeatedly. GPUs stage tiles in shared memory/L1 (with halo regions) to convert redundant global loads into on-chip reuse, since the kernel is otherwise bandwidth-bound."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "In a bounded producer-consumer queue, what two conditions must blocking enqueue/dequeue wait on, and what bug arises if you signal the wrong condition variable?",
+    "a": "**Enqueue blocks while the buffer is full (waits on `not_full`); dequeue blocks while empty (waits on `not_empty`).** Producers signal `not_empty` after inserting; consumers signal `not_full` after removing. If you signal the wrong CV (or use one CV for both with `notify_one`), you can wake a thread that can't proceed while the right one sleeps — leading to a **lost wakeup / deadlock**. Always re-check the predicate in a `while` loop to handle spurious wakeups."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "How can the dining-philosophers / lock-ordering deadlock arise, and what is the standard fix?",
+    "a": "**Deadlock needs all four Coffman conditions: mutual exclusion, hold-and-wait, no preemption, and a circular wait.** Two threads each grab one of two locks and then block forever waiting for the other (circular wait). The standard fix is to impose a **global lock-ordering** — always acquire locks in a fixed total order — which breaks the cycle; alternatives are `std::lock`/two-phase acquisition, try-lock-with-backoff, or a single coarser lock."
+  },
+  {
+    "topic": "CONCURRENCY",
+    "q": "How does a work-stealing scheduler balance load, and why do thieves steal from the opposite end of a victim's deque?",
+    "a": "**Each worker owns a double-ended queue (deque): it pushes/pops its own tasks LIFO from one end (cache-hot, no synchronization in the common case); idle workers steal FIFO from the *other* end of a random victim's deque.** Stealing from the opposite end minimizes contention with the owner and tends to take the oldest, largest sub-tasks (better granularity/locality), while the owner keeps the freshest tasks hot in cache."
+  },
+  {
+    "topic": "ISA",
+    "q": "Define the 'iron law' of processor performance and name its three factors.",
+    "a": "**CPU time = Instruction Count x CPI x Clock Period** (equivalently `IC x CPI / clock frequency`). The three factors are **instruction count** (set by ISA + compiler), **cycles per instruction (CPI)** (set by microarchitecture + ISA), and **clock period** (set by microarchitecture + circuit/process technology). It's called the iron law because all performance changes must flow through one of these three terms."
+  },
+  {
+    "topic": "ISA",
+    "q": "A program executes 5x10^9 instructions, achieves an average CPI of 1.6, on a 4 GHz CPU. Compute the CPU time.",
+    "a": "**2.0 seconds.** Clock period = `1 / 4 GHz = 0.25 ns`. CPU time = IC x CPI x period = `5x10^9 x 1.6 x 0.25x10^-9 s`. Step by step: `5e9 x 1.6 = 8e9` cycles; `8e9 x 0.25e-9 = 2.0 s` (equivalently `8x10^9 cycles / 4x10^9 cycles/s = 2.0 s`)."
+  },
+  {
+    "topic": "ISA",
+    "q": "Compare the defining tradeoff of RISC versus CISC in terms of the iron-law factors.",
+    "a": "**RISC trades higher instruction count for lower CPI and a shorter clock period.** Simple fixed-length instructions enable pipelining (low CPI) and fast clocks but need more instructions per task. **CISC** reduces instruction count with complex, variable-length, memory-operand instructions but historically paid with higher CPI / harder pipelining (modern x86 cracks CISC ops into RISC-like micro-ops to recover this)."
+  },
+  {
+    "topic": "ISA",
+    "q": "What does 'load-store architecture' mean, and how does it constrain where ALU operands come from?",
+    "a": "**A load-store (register-register) architecture allows ALU/arithmetic instructions to operate only on registers and immediates — memory is accessed exclusively by explicit `load` and `store` instructions.** RISC-V, ARM (AArch64), and SPARC are load-store. This simplifies pipelining and dependency tracking, unlike CISC (x86) where arithmetic instructions may take a memory operand directly."
+  },
+  {
+    "topic": "ISA",
+    "q": "State Amdahl's law and compute the maximum speedup if 80% of a program is parallelizable across infinite processors.",
+    "a": "**Amdahl's law: speedup = 1 / ((1 - p) + p/N)**, where `p` is the parallel fraction and `N` the processor count. With `p = 0.8`, as `N -> infinity` the term `p/N -> 0`, so speedup -> `1 / (1 - 0.8) = 1/0.2 = 5x`. The serial 20% caps speedup at 5x regardless of how many processors are added."
+  },
+  {
+    "topic": "ISA",
+    "q": "Contrast Amdahl's law with Gustafson's law in terms of what is held fixed.",
+    "a": "**Amdahl fixes the problem size** and asks how much faster a fixed workload runs with more processors — serial fraction dominates and caps speedup. **Gustafson fixes the run time (scaled speedup)** and lets the problem grow with processors: scaled speedup = `N - (1-p)(N-1) = (1-p) + p*N`, growing roughly linearly. Gustafson reflects that bigger machines tackle bigger problems, softening Amdahl's pessimism."
+  },
+  {
+    "topic": "ISA",
+    "q": "Why is MIPS (millions of instructions per second) an unreliable metric for comparing two different ISAs?",
+    "a": "**MIPS = IC / (exec time x 10^6) = clock rate / (CPI x 10^6), so it rewards executing many cheap instructions and ignores how much work each instruction does.** A RISC machine may have higher MIPS yet do more work per program because it needs more instructions. MIPS also varies per program (CPI varies), so it's not a single machine constant and can't compare across ISAs."
+  },
+  {
+    "topic": "ISA",
+    "q": "Define caller-saved versus callee-saved registers and who is responsible for preserving each across a call.",
+    "a": "**Caller-saved (volatile/temporary) registers may be clobbered by the callee, so the *caller* must save/restore them if it needs their values after the call.** **Callee-saved (non-volatile) registers must be preserved by the *callee* — if it uses them it saves them on entry and restores before return.** This convention is set by the ABI (e.g., in RISC-V `t0-t6` are caller-saved, `s0-s11` are callee-saved)."
+  },
+  {
+    "topic": "ISA",
+    "q": "A 30%-of-runtime function is sped up by 3x. Using Amdahl's law, what is the overall program speedup?",
+    "a": "**About 1.25x.** Overall speedup = `1 / ((1 - 0.3) + 0.3/3) = 1 / (0.7 + 0.1) = 1 / 0.8 = 1.25x`. Even a 3x improvement to a 30% portion yields only a 25% overall gain — illustrating Amdahl's law: optimize the common (largest) case for big wins."
+  },
+  {
+    "topic": "ISA",
+    "q": "Compare microcoded control versus hardwired control and the tradeoff each makes.",
+    "a": "**Hardwired control implements the control logic as a fixed combinational/FSM circuit — fast but inflexible and hard to modify (typical of RISC).** **Microcoded control stores control signals as microinstructions in a control store (ROM/RAM), interpreting each ISA instruction as a microprogram — flexible, supports complex variable-length CISC instructions, and patchable, but slower per step.** RISC favors hardwired; classic CISC (and complex x86 ops) use microcode."
+  },
+  {
+    "topic": "ISA",
+    "q": "What is ISA orthogonality, and give an example of a non-orthogonal restriction.",
+    "a": "**Orthogonality means addressing modes, operand types, and registers can be combined freely and independently — any operation works with any addressing mode on any register.** A non-orthogonal restriction is when certain operations only work with specific registers (e.g., x86's legacy use of specific registers for `mul`/string ops, or shift counts that must be in `CL`). Orthogonal ISAs simplify the compiler/code generation."
+  },
+  {
+    "topic": "ISA",
+    "q": "Given machine A: 2.5 GHz, CPI 2.0; machine B: 2.0 GHz, CPI 1.0, both running the same instruction count. Which is faster and by how much?",
+    "a": "**Machine B is faster — 1.6x.** Cycle time x CPI = time per instruction. A: `2.0 / 2.5e9 = 0.8 ns/instr`. B: `1.0 / 2.0e9 = 0.5 ns/instr`. Speedup of B over A = `0.8 / 0.5 = 1.6x`. Machine B is **1.6x faster** for the same instruction count."
+  },
+  {
+    "topic": "ISA",
+    "q": "How do RISC-V instruction formats (R/I/S/B/U/J types) keep decoding simple and immediates fast to extract?",
+    "a": "**All RISC-V base instructions are fixed 32-bit with the opcode and register fields (`rs1`, `rs2`, `rd`) placed in the same bit positions across formats, so register reads can start before full decode.** The formats differ only in how the immediate is assembled, and immediate bits are arranged so the sign bit always comes from instruction bit 31 — enabling cheap, parallel sign-extension. R has no immediate; I/S/B/U/J carry progressively different immediate layouts."
+  },
+  {
+    "topic": "ISA",
+    "q": "Why can SPEC (e.g., SPECrate vs SPECspeed) be misleading even though it's better than MIPS?",
+    "a": "**SPEC reports a geometric mean of normalized ratios over a benchmark suite, so a single score hides per-application variance and may not reflect *your* workload.** It can be gamed via aggressive compiler flags/auto-tuning, the benchmarks age (cache/memory sizes outgrow them), and SPECspeed (single-task latency) vs SPECrate (throughput across copies) measure different things — comparing the wrong one misleads."
+  },
+  {
+    "topic": "ISA",
+    "q": "A new instruction reduces instruction count by 20% but raises CPI from 1.5 to 1.8 (clock unchanged). Is it a win?",
+    "a": "**Yes — about a 4% speedup.** Relative CPU time = `IC x CPI` (clock fixed). New / old = `(0.8 x 1.8) / (1.0 x 1.5) = 1.44 / 1.5 = 0.96`. New time is `0.96` of the old, i.e. a **~4% speedup**. The instruction-count factor (0.8) outweighs the CPI factor (1.2): `0.8 x 1.2 = 0.96`."
+  },
+  {
+    "topic": "ISA",
+    "q": "How does the role of the register file differ in motivating RISC's larger architectural register count versus x86's historically small set?",
+    "a": "**A larger architectural register file (RISC: typically 32 GPRs in RISC-V/ARM/SPARC) reduces memory traffic by keeping more operands in registers, easing the compiler's register allocation and exposing more ILP.** Legacy x86 (IA-32) exposed only 8 GPRs, forcing more spills; it recovers performance via register renaming onto a large physical register file (and x86-64 widened the architectural set to 16). SPARC additionally uses register windows to speed call/return."
+  },
+  {
+    "topic": "ISA",
+    "q": "Spot the flaw: 'Lowering CPI always lowers CPU time, so a single-cycle CPU (CPI=1) beats a pipelined one (CPI>1).'",
+    "a": "**The flaw is ignoring clock period in the iron law.** A single-cycle design forces the clock period to fit the slowest instruction's whole datapath, so its period is large; a pipelined design has CPI slightly above 1 (from hazards/stalls) but a far shorter period set by one stage. CPU time = `IC x CPI x period` — pipelining wins because the period shrinks more than CPI grows."
+  },
+  {
+    "topic": "ISA",
+    "q": "What is endianness, and why must an ISA/ABI fix a byte order?",
+    "a": "**Endianness defines the byte ordering of a multi-byte value in memory: little-endian stores the least-significant byte at the lowest address (x86, RISC-V, ARM default); big-endian stores the most-significant byte first (SPARC, network byte order).** The ISA/ABI must pin a convention so binaries, memory layouts, and data exchanged between machines agree; mismatches corrupt multi-byte loads/stores. Some ARM/PowerPC cores are bi-endian, selectable at boot."
   }
 ]

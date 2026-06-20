@@ -1,5 +1,5 @@
 /* Offline-first service worker. Bump CACHE to force update after edits. */
-const CACHE = 'prep-cards-v2';
+const CACHE = 'prep-cards-v3';
 const ASSETS = [
   './', './index.html', './style.css', './app.js',
   './manifest.webmanifest', './cards.json',

@@ -19,7 +19,7 @@ function save(k, v){ localStorage.setItem(k, JSON.stringify(v)); }
 function startOfDay(t){ const d=new Date(t); d.setHours(0,0,0,0); return d.getTime(); }
 
 /* ---------- load deck ---------- */
-fetch('cards.json?_=' + Math.floor(now()/3600000))
+fetch('cards.json?v=' + now(), { cache: 'reload' })
   .then(r => r.json())
   .then(data => { CARDS = data.map(normalize); init(); })
   .catch(() => { $('#front').textContent = 'Could not load cards.json'; $('#card').classList.remove('hidden'); });
